@@ -364,6 +364,7 @@
     S.chats = data.chats || [];
     S.projects = data.projects || [];
     S.running = new Set(data.running || []);
+    S.suggestions = data.suggestions || {};
     renderSidebar();
     if (S.chat) {
       const cur = S.chats.find(c => c.id === S.chat.id);
@@ -686,6 +687,7 @@
       <div class="composer-wrap">
         <div class="composer">
           <div class="pending-files hidden"></div>
+          <div class="suggest hidden"><button class="sg-text" title="Вставить в поле"></button><button class="sg-send" title="Отправить">${icon('chev')}</button></div>
           <textarea rows="1" placeholder="${opts.chatId ? 'Ответить Claude…' : 'Чем могу помочь?'}"></textarea>
           <div class="c-row">
             <button class="c-btn" data-attach title="Прикрепить файлы">${icon('clip')}</button>
@@ -714,8 +716,24 @@
         send.disabled = empty || uploading;
       }
     }
-    wrap._update = () => { updateSend(); renderModes(wrap); renderFiles(wrap); };
-    ta.addEventListener('input', grow);
+    wrap._update = () => { updateSend(); renderModes(wrap); renderFiles(wrap); renderSuggestion(); };
+    // Подсказка следующего сообщения (как в приложении Claude): текст — вставить, «›» — отправить
+    const sg = wrap.querySelector('.suggest');
+    function renderSuggestion() {
+      const text = opts.chatId && (S.suggestions || {})[opts.chatId];
+      const show = !!text && !ta.value && !isRunning(opts.chatId) && !S.files.length;
+      sg.classList.toggle('hidden', !show);
+      if (show) sg.querySelector('.sg-text').textContent = text;
+    }
+    sg.querySelector('.sg-text').onclick = () => {
+      ta.value = (S.suggestions || {})[opts.chatId] || '';
+      grow(); ta.focus();
+    };
+    sg.querySelector('.sg-send').onclick = () => {
+      ta.value = (S.suggestions || {})[opts.chatId] || '';
+      if (ta.value) submit();
+    };
+    ta.addEventListener('input', () => { grow(); renderSuggestion(); });
     ta.addEventListener('keydown', e => {
       if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); if (!send.disabled && !send.classList.contains('stop')) submit(); }
     });
@@ -745,6 +763,7 @@
       if (!text && !files.length) return;
       if (S.files.some(f => f.uploading)) { toast('Дождитесь загрузки файлов'); return; }
       ta.value = ''; S.files = []; grow(); renderFiles(wrap);
+      if (opts.chatId && S.suggestions) { delete S.suggestions[opts.chatId]; renderSuggestion(); }
       try {
         if (opts.chatId) {
           addPending(text, files);
