@@ -171,13 +171,17 @@
 
   function logout(silent) {
     S.token = ''; save('token', '');
-    if (events) { events.close(); events = null; }
+    stopUpdates();
     showPair(silent ? 'Доступ этого компьютера отозван на телефоне — подключитесь заново.' : '');
   }
 
   // ------------------------------------------------------------ запуск
   async function boot() {
-    if (REMOTE && !BASE && !(await resolveBase())) { showOffline(); return; }
+    clearTimeout(offlineTimer);
+    if (REMOTE && !BASE) {
+      const found = await resolveBase();
+      if (found !== true) { showOffline(found); return; }
+    }
     if (!S.token) { showPair(); return; }
     let state;
     try { state = await api('GET', '/api/state'); } catch (e) {
@@ -193,7 +197,7 @@
     $('#pair').classList.add('hidden');
     app.classList.remove('hidden');
     app.classList.toggle('collapsed', S.collapsed);
-    connectEvents();
+    startUpdates();
     route();
   }
 
@@ -206,85 +210,143 @@
     $('#phone-name').textContent = st.phone || 'Телефон';
   }
 
+  function onHello(st) {
+    setOnline(true);
+    applyState(st);
+    renderSidebar();
+    renderComposerState();
+    if (S.route.name === 'chat') reloadChat(); else if (S.pageRedraw) S.pageRedraw();
+  }
+
+  // ------------------------------------------------------------ обновления с телефона
+  // В сети Wi-Fi — поток событий (SSE). Через туннель Cloudflare SSE не проходит (ограничение бесплатных туннелей),
+  // поэтому там — долгий опрос /api/poll: телефон отвечает, как только что-то изменилось.
+  let pollCtrl = null;
+  let sseErrors = 0;
+  function startUpdates() {
+    stopUpdates();
+    if (REMOTE || S.forcePoll) pollLoop(); else connectEvents();
+  }
+
+  function stopUpdates() {
+    if (events) { events.close(); events = null; }
+    if (pollCtrl) { pollCtrl.abort(); pollCtrl = null; }
+  }
+
   function connectEvents() {
-    if (events) events.close();
+    let opened = false;
     events = new EventSource(BASE + '/api/events?token=' + encodeURIComponent(S.token));
-    events.addEventListener('hello', e => {
-      setOnline(true);
-      applyState(JSON.parse(e.data));
-      renderSidebar();
-      renderComposerState();
-      if (S.route.name === 'chat') reloadChat(); else if (S.pageRedraw) S.pageRedraw();
-    });
+    events.addEventListener('hello', e => onHello(JSON.parse(e.data)));
     events.addEventListener('chats', e => onChats(JSON.parse(e.data)));
     events.addEventListener('live', e => onLive(JSON.parse(e.data)));
     events.addEventListener('questions', e => onQuestions(JSON.parse(e.data)));
     events.addEventListener('revoked', () => logout(true));
-    events.onopen = () => setOnline(true);
+    events.onopen = () => { opened = true; sseErrors = 0; setOnline(true); };
     events.onerror = () => {
       setOnline(false);
+      // Поток не открывается (его режет антивирус или прокси) — переходим на опрос
+      if (!opened && ++sseErrors >= 3) { S.forcePoll = true; startUpdates(); return; }
       // Токен отозван — EventSource сам этого не скажет: проверяем обычным запросом
       fetch(BASE + '/api/state', { headers: { Authorization: 'Bearer ' + S.token } })
         .then(r => { if (r.status === 401) logout(true); })
-        .catch(() => { if (REMOTE) relocate(); });
+        .catch(() => {});
     };
   }
 
+  async function pollLoop() {
+    const ctrl = new AbortController();
+    pollCtrl = ctrl;
+    let keys = {};
+    let fails = 0;
+    while (pollCtrl === ctrl) {
+      try {
+        const r = await fetch(BASE + '/api/poll?' + new URLSearchParams(keys).toString(), {
+          headers: { Authorization: 'Bearer ' + S.token }, signal: ctrl.signal, cache: 'no-store'
+        });
+        if (r.status === 401) { logout(true); return; }
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        const d = await r.json();
+        if (pollCtrl !== ctrl) return;
+        fails = 0;
+        setOnline(true);
+        if (d.revoked) { logout(true); return; }
+        keys = d.keys || {};
+        if (d.hello) onHello(d.hello);
+        if (d.chats) onChats(d.chats);
+        if (d.live) onLive(d.live);
+        if (d.questions) onQuestions(d.questions);
+      } catch (e) {
+        if (ctrl.signal.aborted || pollCtrl !== ctrl) return;
+        fails++;
+        setOnline(false);
+        // Через интернет: туннель мог перезапуститься с новым адресом
+        if (REMOTE && fails >= 2) {
+          const old = BASE;
+          if (await resolveBase() === true && BASE !== old) keys = {};
+        }
+        await new Promise(res => setTimeout(res, Math.min(10000, 1000 * fails)));
+      }
+    }
+  }
+
   // ------------------------------------------------------------ доступ из интернета
-  /** Текущий адрес туннеля: GitHub API (без задержки), запасной путь — копия на Pages. Проверяет, что телефон отвечает. */
+  /**
+   * Текущий адрес туннеля: GitHub API (сразу после изменения), запасной путь — копия на Pages (если API исчерпал
+   * лимит 60 запросов в час). true — телефон отвечает; иначе причина: 'off' — доступ выключен, 'noanswer' — адрес
+   * есть, но телефон не отвечает, 'nolink' — не удалось узнать адрес.
+   */
   async function resolveBase() {
     const sources = [
       () => fetch(`https://api.github.com/repos/${REMOTE.repo}/contents/connect/tunnel.json?ref=${encodeURIComponent(REMOTE.branch || 'main')}`,
         { headers: { Accept: 'application/vnd.github.raw+json' }, cache: 'no-store' }),
       () => fetch('tunnel.json?ts=' + Date.now(), { cache: 'no-store' })
     ];
+    let reason = 'nolink';
+    const tried = new Set();
     for (const get of sources) {
       let info;
       try { const r = await get(); if (!r.ok) continue; info = await r.json(); } catch (e) { continue; }
       const url = String(info.url || '').replace(/\/+$/, '');
-      if (!/^https:\/\/[a-z0-9.-]+$/i.test(url)) return false;
+      if (!url) { if (reason === 'nolink') reason = 'off'; continue; }
+      if (!/^https:\/\/[a-z0-9.-]+$/i.test(url) || tried.has(url)) continue;
+      tried.add(url);
       try {
         const ctrl = new AbortController();
-        const timer = setTimeout(() => ctrl.abort(), 10000);
+        const timer = setTimeout(() => ctrl.abort(), 12000);
         const ping = await fetch(url + '/api/ping', { signal: ctrl.signal, cache: 'no-store' });
         clearTimeout(timer);
-        if (!ping.ok) return false;
-      } catch (e) { return false; }
-      BASE = url;
-      return true;
+        if (ping.ok) { BASE = url; return true; }
+      } catch (e) { /* не отвечает */ }
+      reason = 'noanswer';
     }
-    return false;
-  }
-
-  /** Связь пропала: туннель мог перезапуститься с новым адресом — переподключаемся к нему. */
-  let relocating = false;
-  async function relocate() {
-    if (relocating) return;
-    relocating = true;
-    const old = BASE;
-    try {
-      if (await resolveBase() && BASE !== old) connectEvents();
-    } finally {
-      setTimeout(() => { relocating = false; }, 15000);
-    }
+    return reason;
   }
 
   let offlineTimer = null;
-  function showOffline() {
+  let offlineTries = 0;
+  function showOffline(reason) {
+    stopUpdates();
     app.classList.add('hidden');
     const el = $('#pair');
     el.classList.remove('hidden');
+    const text = reason === 'off'
+      ? 'На телефоне выключен «Через интернет». Включите: «Настройки» → «Доступ с компьютера» → «Через интернет».'
+      : reason === 'noanswer'
+        ? 'Адрес телефона известен, но телефон не отвечает. Проверьте, что на телефоне есть интернет и приложение Claude не закрыто. На телефоне нажмите «Проверить подключение».'
+        : 'Не удалось узнать адрес телефона (нет связи с GitHub). Проверьте интернет на компьютере.';
     el.innerHTML = `
       <div class="pair-card">
         <div class="logo">${LOGO}</div>
         <h1>Телефон не в сети</h1>
-        <p>Включите на телефоне: «Настройки» → «Доступ с компьютера» → «Доступ из интернета». Нужен интернет на телефоне (Wi-Fi или мобильный).</p>
+        <p>${esc(text)}</p>
         <button class="btn accent" id="retry">Проверить снова</button>
-        <div class="small">Страница проверяет сама каждые 15 секунд.</div>
+        <div class="small">Страница проверяет сама каждые ${offlineTries < 8 ? 15 : 60} секунд.</div>
       </div>`;
-    $('#retry').onclick = () => { clearTimeout(offlineTimer); $('#retry').textContent = 'Проверяю…'; boot(); };
+    $('#retry').onclick = () => { $('#retry').textContent = 'Проверяю…'; boot(); };
     clearTimeout(offlineTimer);
-    offlineTimer = setTimeout(boot, 15000);
+    offlineTries++;
+    // Реже после 2 минут: GitHub API разрешает 60 запросов в час
+    offlineTimer = setTimeout(boot, offlineTries < 8 ? 15000 : 60000);
   }
 
   function setOnline(on) {
@@ -976,7 +1038,9 @@
     }
     const sc = $('#chat-scroll');
     const atBottom = !sc || sc.scrollHeight - sc.scrollTop - sc.clientHeight < 140;
-    const status = (a && a.status) || 'Думаю…';
+    const raw = (a && a.status) || 'Думаю…';
+    // Состояние до начала текста («Синхронизация…», «Думаю…») не обновляется, пока модель пишет
+    const status = a && a.text && /^(Синхронизация|Думаю)/.test(raw) ? 'Пишу ответ…' : raw;
     const steps = (a && a.steps) || [];
     const text = (a && a.text) || '';
     if (!box.firstElementChild) {
