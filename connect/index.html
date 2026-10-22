@@ -9,23 +9,40 @@
 <link rel="stylesheet" href="app.css">
 <script>
   // Тема до отрисовки — без вспышки светлого фона
-  try { var t = localStorage.getItem('theme'); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
+  try { var t = localStorage.getItem('theme'); if (!t && window.ClaudeInner) t = ClaudeInner.theme(); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
 </script>
 </head>
 <body>
 <div id="app" class="hidden">
   <aside id="sidebar">
     <div class="sb-head">
-      <div class="brand"><span data-logo></span>Claude</div>
-      <div class="spacer"></div>
       <button class="icon-btn" id="collapse" title="Скрыть панель"><svg class="i"><use href="#i-sidebar"/></svg></button>
+      <div class="brand" id="brand">Claude</div>
+      <div class="spacer"></div>
+      <div class="mode-switch" id="mode-switch">
+        <button data-mode="chat" title="Чат"><svg class="i"><use href="#i-chat"/></svg></button>
+        <button data-mode="code" title="Код (Claude Code)"><svg class="i"><use href="#i-code"/></svg></button>
+      </div>
     </div>
-    <button class="sb-new" id="new-chat"><span class="plus"><svg class="i" style="width:16px;height:16px"><use href="#i-plus"/></svg></span>Новый чат</button>
+    <!-- Как боковое меню приложения: проект, большая кнопка «Новый чат», пункты в том же порядке -->
+    <button class="sb-project" id="sb-project" title="Проект: новые чаты создаются в нём">
+      <svg class="i pj-ic"><use href="#i-folder"/></svg>
+      <span class="pj"><span class="pj-l">Проект</span><span class="pj-n" id="sb-project-name">Без проекта</span></span>
+      <svg class="i"><use href="#i-down"/></svg>
+    </button>
+    <button class="sb-newchat" id="new-chat"><svg class="i"><use href="#i-plus"/></svg><span id="new-label">Новый чат</span></button>
     <nav class="sb-nav">
-      <a class="sb-link" href="#/chats" data-nav="chats"><svg class="i"><use href="#i-chat"/></svg>Чаты</a>
+      <a class="sb-link" href="#/chats" data-nav="chats" data-only="chat"><svg class="i"><use href="#i-chat"/></svg>Чаты</a>
       <a class="sb-link" href="#/projects" data-nav="projects"><svg class="i"><use href="#i-folder"/></svg>Проекты</a>
+      <a class="sb-link" href="#/tasks" data-nav="tasks"><svg class="i"><use href="#i-checklist"/></svg>Задачи</a>
+      <a class="sb-link" href="#/parallel" data-nav="parallel"><svg class="i"><use href="#i-layers"/></svg>Параллельные задачи</a>
       <a class="sb-link" href="#/artifacts" data-nav="artifacts"><svg class="i"><use href="#i-artifact"/></svg>Артефакты</a>
+      <a class="sb-link" href="#/code" data-nav="code"><svg class="i"><use href="#i-code"/></svg>Код</a>
+      <label class="sb-search"><svg class="i"><use href="#i-search"/></svg><input id="sb-search" placeholder="Поиск по чатам" autocomplete="off"></label>
+      <a class="sb-link" href="#/settings" data-nav="settings"><svg class="i"><use href="#i-person"/></svg>Персонализация</a>
+      <div id="nav-extra"></div>
     </nav>
+    <div class="sb-recent-head"><span>Недавние</span><button class="icon-btn sm" id="new-chat-2" title="Новый чат"><svg class="i"><use href="#i-plus"/></svg></button></div>
     <div class="sb-scroll" id="chat-list"></div>
     <div class="sb-foot">
       <div class="phone">
@@ -38,18 +55,22 @@
       <button class="icon-btn" id="settings-btn" title="Настройки"><svg class="i"><use href="#i-gear"/></svg></button>
     </div>
   </aside>
+  <div id="sb-scrim"></div>
   <main id="main">
     <div id="banner" class="banner hidden">Нет связи с телефоном — переподключаюсь…</div>
     <header id="topbar">
       <button class="icon-btn open-sb" id="open-sb" title="Показать панель"><svg class="i"><use href="#i-sidebar"/></svg></button>
       <span class="crumb" id="crumb"></span>
       <div class="title" id="title"></div>
-      <button class="icon-btn hidden" id="chat-menu" title="Действия с чатом"><svg class="i"><use href="#i-dots"/></svg></button>
+      <button class="icon-btn sm hidden" id="chat-menu" title="Действия с чатом"><svg class="i"><use href="#i-down"/></svg></button>
       <div class="spacer"></div>
+      <span id="topbar-extra" style="display:flex;gap:4px;align-items:center"></span>
       <button class="icon-btn hidden" id="artifacts-btn" title="Артефакты чата"><svg class="i"><use href="#i-artifact"/></svg></button>
+      <button class="icon-btn hidden" id="info-btn" title="Панель: среда, контекст, задачи"><svg class="i"><use href="#i-info-panel"/></svg></button>
     </header>
     <div id="view"></div>
   </main>
+  <aside id="info" class="hidden"></aside>
   <div id="resizer" class="hidden"></div>
   <aside id="panel" class="hidden"></aside>
 </div>
@@ -85,10 +106,20 @@
     <symbol id="i-code" viewBox="0 0 24 24"><path d="M8 7l-5 5 5 5M16 7l5 5-5 5"/></symbol>
     <symbol id="i-open" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></symbol>
     <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4L19 9l-4-4L4 16z"/></symbol>
+    <symbol id="i-person" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2.5"/><circle cx="9" cy="11" r="2.2"/><path d="M5.8 16.5c.6-1.6 1.8-2.5 3.2-2.5s2.6.9 3.2 2.5M14.5 10h4M14.5 13.5h3"/></symbol>
+    <symbol id="i-info-panel" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2.5"/><path d="M14 4v16M16.5 8h2M16.5 11h2M16.5 14h2"/></symbol>
+    <symbol id="i-branch" viewBox="0 0 24 24"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="8" r="2"/><path d="M6 7v10M18 10c0 4-6 3-11.5 7"/></symbol>
+    <symbol id="i-repo" viewBox="0 0 24 24"><path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H19v15H6.5A1.5 1.5 0 0 0 5 19.5zM5 19.5A1.5 1.5 0 0 0 6.5 21H19M9 7h6"/></symbol>
+    <symbol id="i-cloud" viewBox="0 0 24 24"><path d="M7 18a4.5 4.5 0 0 1-.6-9A6 6 0 0 1 18 8.5a4.8 4.8 0 0 1-.5 9.5z"/></symbol>
     <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></symbol>
   </defs>
 </svg>
 <script>window.CLAUDE_REMOTE = { repo: "VARTA2005/claude-artifacts", branch: "main" };</script>
 <script src="app.js"></script>
+<script src="mod-settings.js"></script>
+<script src="mod-extensions.js"></script>
+<script src="mod-code.js"></script>
+<script src="mod-chat.js"></script>
+<script src="mod-work.js"></script>
 </body>
 </html>
