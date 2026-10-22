@@ -27,6 +27,8 @@
   const $ = (sel, root) => (root || document).querySelector(sel);
   // Страница-закладка на GitHub Pages («Доступ из интернета»): адрес телефона — текущий туннель из connect/tunnel.json
   const REMOTE = window.CLAUDE_REMOTE || null;
+  // Страница открыта через свой сервер-пересадку («Через свой сервер»): SSE там не проходит
+  const RELAY = !!window.CLAUDE_RELAY;
   let BASE = '';
   const app = $('#app');
   let events = null;
@@ -126,7 +128,7 @@
         ${message ? `<p style="color:var(--danger)">${esc(message)}</p>` : ''}
         <input class="field" id="pair-name" value="${esc(load('deviceName') || defaultName())}" maxlength="60" placeholder="Название компьютера">
         <button class="btn accent" id="pair-go">Подключить</button>
-        <div class="small">${REMOTE ? 'Подключение через интернет: телефон может быть в любой сети.' : 'Телефон и компьютер должны быть в одной сети Wi-Fi.'} На телефоне: «Настройки» → «Доступ с компьютера».</div>
+        <div class="small">${REMOTE || RELAY ? 'Подключение через интернет: телефон может быть в любой сети.' : 'Телефон и компьютер должны быть в одной сети Wi-Fi.'} На телефоне: «Настройки» → «Доступ с компьютера».</div>
       </div>`;
     $('#pair-go').onclick = startPair;
     $('#pair-name').onkeydown = e => { if (e.key === 'Enter') startPair(); };
@@ -225,7 +227,7 @@
   let sseErrors = 0;
   function startUpdates() {
     stopUpdates();
-    if (REMOTE || S.forcePoll) pollLoop(); else connectEvents();
+    if (REMOTE || RELAY || S.forcePoll) pollLoop(); else connectEvents();
   }
 
   function stopUpdates() {
